@@ -3,7 +3,7 @@ import './globals.css';
 
 export const metadata: Metadata = {
   title: 'GrabTube',
-  description: 'Private adult video downloader — direct links, no redirects.',
+  description: 'Private tube downloader — server-side extraction, same-origin proxy.',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
