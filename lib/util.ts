@@ -1,8 +1,6 @@
 export const VIDEO_RE = /\.(mp4|m3u8|webm|mov|m4v|mpd)(?:[?#]|$)/i;
 export const HLS_RE = /\.m3u8(?:[?#]|$)/i;
-export const IMAGE_RE = /\.(jpe?g|png|webp|avif|gif|svg)(?:[?#]|$)/i;
 
-/** Unescape every flavour of HTML/JS entity these tubes emit. */
 export function decodeEntities(s: string): string {
   return s
     .replace(/\\u0026/gi, '&')
@@ -31,7 +29,6 @@ export function absolutize(raw: string, base: string): string {
   }
 }
 
-/** Return the balanced {...} or [...] block that starts at/after `from`. */
 export function extractBalanced(text: string, from: number, open = '{', close = '}'): string | null {
   const start = text.indexOf(open, from);
   if (start === -1) return null;
@@ -58,15 +55,11 @@ export function extractBalanced(text: string, from: number, open = '{', close = 
   return null;
 }
 
-/** Tolerant JSON parse (trailing commas, single quotes). */
 export function looseJson(raw: string): unknown | null {
-  const attempts = [raw, raw.replace(/,\s*([}\]])/g, '$1'), raw.replace(/'/g, '"')];
-  for (const a of attempts) {
+  for (const a of [raw, raw.replace(/,\s*([}\]])/g, '$1'), raw.replace(/'/g, '"')]) {
     try {
       return JSON.parse(a);
-    } catch {
-      /* try next */
-    }
+    } catch {}
   }
   return null;
 }
@@ -90,9 +83,15 @@ export function dedupe<T>(arr: T[], key: (t: T) => string): T[] {
   return out;
 }
 
+const LABEL_HEIGHTS: Record<string, number> = {
+  '2160': 2160, '4k': 2160, '1440': 1440, '1080': 1080, high: 1080, hd: 1080,
+  '720': 720, medium: 720, sd: 480, '480': 480, low: 360, '360': 360,
+};
+
 export function heightFrom(s: string): number {
-  if (/2160|4k/i.test(s)) return 2160;
-  const m = String(s).match(/(\d{3,4})\s*p?\b/);
+  const t = String(s).toLowerCase();
+  for (const [k, v] of Object.entries(LABEL_HEIGHTS)) if (t.includes(k)) return v;
+  const m = t.match(/(\d{3,4})\s*p?\b/);
   return m ? parseInt(m[1], 10) : 0;
 }
 
