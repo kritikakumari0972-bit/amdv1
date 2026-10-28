@@ -1,6 +1,7 @@
-import { cookieFor, fetchFirst, probeSize } from './http';
+import { cookieFor, fetchFirst, probeSize, resolveTarget, type Jar } from './http';
+import { normalizeUrl } from './normalize';
 import { parseGeneric, resolveSite, type ParseCtx, type RawFormat } from './sites';
-import { dedupe, heightFrom } from './util';
+import { absolutize, dedupe, heightFrom, looseJson } from './util';
 
 export type ExtractFormat = {
   url: string;
@@ -19,36 +20,44 @@ export type ExtractResult = {
   formats: ExtractFormat[];
   diagnostics: string[];
   status: number;
+  reachable: boolean;
   tried: string[];
   anchorFound: boolean | null;
 };
 
 export type ExtractOpts = { sizes?: boolean; anchor?: string };
 
-export async function runExtract(
-  rawUrl: string,
-  userCookie = '',
-  opts: ExtractOpts = {},
-): Promise<ExtractResult> {
+export async function runExtract(rawUrl: string, userCookie = '', opts: ExtractOpts = {}): Promise<ExtractResult> {
   const diag: string[] = [];
-  const site = resolveSite(rawUrl);
-  const referer = site?.referer ?? new URL(rawUrl).origin + '/';
-  const cookie = userCookie || cookieFor(referer);
-  const urls = site?.mirrors ? site.mirrors(rawUrl) : [rawUrl];
-
-  const page = await fetchFirst(urls, { referer, cookie, timeout: 15000 });
-
+  const url = normalizeUrl(rawUrl);
   const base: ExtractResult = {
     ok: false,
-    site: site?.id ?? 'generic',
+    site: 'generic',
     pageTitle: '',
     thumbnail: null,
     formats: [],
     diagnostics: diag,
-    status: page.status || 502,
-    tried: page.tried,
+    status: 0,
+    reachable: false,
+    tried: [],
     anchorFound: null,
   };
+  if (!url) {
+    diag.push('unparsable URL');
+    return base;
+  }
+
+  const site = resolveSite(url);
+  const referer = site?.referer ?? new URL(url).origin + '/';
+  const cookie = userCookie || cookieFor(referer);
+  const jar: Jar = new Map();
+  const urls = site?.mirrors ? site.mirrors(url) : [url];
+
+  const page = await fetchFirst(urls, { referer, cookie, timeout: 15000, jar });
+  base.site = site?.id ?? 'generic';
+  base.status = page.status;
+  base.reachable = page.status > 0;
+  base.tried = page.tried;
 
   if (!page.ok || !page.text) {
     diag.push(`page load failed (${page.error || page.status || 'network'})`);
@@ -60,7 +69,7 @@ export async function runExtract(
     html: page.text,
     pageUrl: page.url,
     diag,
-    get: (u, o) => fetchFirst([u], { referer, cookie, ...o }),
+    get: (u, o) => fetchFirst([u], { referer, cookie, jar, ...o }),
   };
 
   let parsed: { formats: RawFormat[]; title?: string; thumbnail?: string } = { formats: [] };
@@ -71,13 +80,30 @@ export async function runExtract(
       diag.push(`parser error: ${(e as Error).message}`);
     }
   } else {
-    diag.push('no dedicated parser, using generic scan');
+    diag.push('no registered site, generic scan only');
   }
 
   let formats = parsed.formats;
   if (!formats.length) {
     formats = parseGeneric(page.text, page.url);
     diag.push(`generic scan -> ${formats.length}`);
+  }
+
+  // resolve indirect URLs (Pornhub /video/get_media) into real files
+  for (const f of formats) {
+    if (!f.remote) continue;
+    const r = await resolveTarget(f.url, referer, cookie, jar);
+    if (r.text) {
+      const j = looseJson(r.text) as any;
+      const u = typeof j === 'string' ? j : j?.url ?? j?.videoUrl ?? j?.mp4 ?? '';
+      if (u) f.url = absolutize(u, r.finalUrl);
+      diag.push(`remote json -> ${u ? 'resolved' : 'no url'}`);
+    } else if (r.finalUrl !== f.url) {
+      f.url = r.finalUrl;
+      diag.push('remote redirect followed');
+    } else {
+      diag.push(`remote unresolved (${r.contentType || 'no ct'})`);
+    }
   }
 
   formats = dedupe(formats, (f) => f.url).filter((f) => !/\.(jpe?g|png|webp|avif|gif|svg)(\?|$)/i.test(f.url));
@@ -89,9 +115,7 @@ export async function runExtract(
   });
 
   const mk = (u: string) =>
-    `/api/stream?u=${encodeURIComponent(u)}&r=${encodeURIComponent(referer)}${
-      cookie ? `&c=${encodeURIComponent(cookie)}` : ''
-    }`;
+    `/api/stream?u=${encodeURIComponent(u)}&r=${encodeURIComponent(referer)}${cookie ? `&c=${encodeURIComponent(cookie)}` : ''}`;
 
   const out: ExtractFormat[] = formats.map((f) => ({
     url: f.url,
@@ -108,7 +132,7 @@ export async function runExtract(
         .slice(0, 6)
         .filter((f) => f.kind === 'mp4')
         .map(async (f) => {
-          f.size = await probeSize(f.url, referer, cookie);
+          f.size = await probeSize(f.url, referer, cookie, jar);
         }),
     );
   }

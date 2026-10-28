@@ -1,6 +1,7 @@
 'use client';
 
 export type Progress = (done: number, total: number) => void;
+export type MergeResult = { blob: Blob; extension: string };
 
 function resolve(uri: string, base: string): string {
   try {
@@ -22,19 +23,10 @@ function ivFor(sequence: number, ivHex: string | null): Uint8Array {
   return out;
 }
 
-/**
- * Fetch a (already proxied) HLS playlist, decrypt AES-128 if needed, and
- * concatenate the segments into a single .ts Blob.
- */
-export async function mergeHls(
-  playlistUrl: string,
-  onProgress?: Progress,
-  signal?: AbortSignal,
-): Promise<Blob> {
+export async function mergeHls(playlistUrl: string, onProgress?: Progress, signal?: AbortSignal): Promise<MergeResult> {
   let text = await (await fetch(playlistUrl, { signal })).text();
   let base = playlistUrl;
 
-  // master playlist -> pick the highest bandwidth variant
   if (/#EXT-X-STREAM-INF/.test(text)) {
     const lines = text.split(/\r?\n/);
     let best = '';
@@ -56,6 +48,7 @@ export async function mergeHls(
     }
   }
 
+  const isFmp4 = /#EXT-X-MAP/.test(text);
   let keyUri: string | null = null;
   let ivHex: string | null = null;
   let mediaSequence = 0;
@@ -73,13 +66,12 @@ export async function mergeHls(
       segments.push(resolve(line, base));
     }
   }
-
   if (!segments.length) throw new Error('Playlist contained no segments');
 
   let key: CryptoKey | null = null;
   if (keyUri) {
-    const keyBytes = await (await fetch(resolve(keyUri, base), { signal })).arrayBuffer();
-    key = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-CBC' }, false, ['decrypt']);
+    const bytes = await (await fetch(resolve(keyUri, base), { signal })).arrayBuffer();
+    key = await crypto.subtle.importKey('raw', bytes, { name: 'AES-CBC' }, false, ['decrypt']);
   }
 
   const parts: ArrayBuffer[] = new Array(segments.length);
@@ -90,20 +82,18 @@ export async function mergeHls(
     while (cursor < segments.length) {
       const index = cursor++;
       const buffer = await (await fetch(segments[index], { signal })).arrayBuffer();
-      if (key) {
-        parts[index] = await crypto.subtle.decrypt(
-          { name: 'AES-CBC', iv: ivFor(mediaSequence + index, ivHex) },
-          key,
-          buffer,
-        );
-      } else {
-        parts[index] = buffer;
-      }
+      parts[index] = key
+        ? await crypto.subtle.decrypt({ name: 'AES-CBC', iv: ivFor(mediaSequence + index, ivHex) }, key, buffer)
+        : buffer;
       done++;
       onProgress?.(done, segments.length);
     }
   };
 
   await Promise.all(Array.from({ length: Math.min(5, segments.length) }, worker));
-  return new Blob(parts, { type: 'video/mp2t' });
+
+  return {
+    blob: new Blob(parts, { type: isFmp4 ? 'video/mp4' : 'video/mp2t' }),
+    extension: isFmp4 ? 'mp4' : 'ts',
+  };
 }
